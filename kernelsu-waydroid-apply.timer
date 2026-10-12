@@ -1,0 +1,13 @@
+[Unit]
+Description=Retry the KernelSU/Waydroid integration until it succeeds
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+# Catch up after the machine was powered off.
+Persistent=true
+AccuracySec=1min
+Unit=kernelsu-waydroid-apply.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+# Package-owned Waydroid integration for kernelsu-dkms.
+#
+# Installed as /usr/lib/kernelsu-waydroid/apply and started by
+# kernelsu-waydroid-apply.service. Performs only the runtime cutover: it never
+# builds, installs packages, or loads/unloads the module in-place.
+set -Eeuo pipefail
+
+readonly SHARE=/usr/share/kernelsu-waydroid
+readonly APKCERT=/usr/lib/kernelsu-waydroid/apkcert
+readonly APK="$SHARE/manager.apk"
+readonly CERT="$SHARE/manager-cert.der"
+readonly MANIFEST="$SHARE/manifest.txt"
+readonly STATE=/var/lib/kernelsu-waydroid
+readonly BACKUP_ROOT="$STATE/backups"
+readonly SECCOMP=/var/lib/waydroid/lxc/waydroid/waydroid-seccomp
+readonly SECCOMP_ALT=/var/lib/waydroid/lxc/waydroid/waydroid.seccomp
+readonly LXCCONF=/var/lib/waydroid/lxc/waydroid/config
+readonly MODULE_NAME=kernelsu
+readonly CONTAINER=waydroid-container.service
+
+# Refuse to unload the module: on some x86_64 kernels unloading a live KernelSU
+# can panic. The running module is only ever replaced by a reboot.
+readonly ALLOW_MODULE_SWAP=0
+# Replacing Manager with a different signing identity resets its app-local
+# settings. Off unless the admin opts in.
+readonly ALLOW_MANAGER_REPLACE="${KSU_ALLOW_MANAGER_REPLACE:-0}"
+
+RUN_ID=$(date +%Y%m%d-%H%M%S)-$$
+BACKUP=
+
+log()  { printf '\n[%s] %s\n' "$(date '+%F %T')" "$*"; }
+warn() { printf '[%s] WARNING: %s\n' "$(date '+%F %T')" "$*" >&2; }
+die()  { printf '[%s] ERROR: %s\n' "$(date '+%F %T')" "$*" >&2; exit 1; }
+
+defer() {
+	log "DEFERRED: $*"
+	log 'Run: systemctl start kernelsu-waydroid-apply.service'
+	exit 0
+}
+
+[[ $EUID == 0 ]] || die 'Must run as root.'
+
+USER_NAME=
+DISPLAY_NAME=
+SESSION_PID=
+SESSION_STARTED=0
+SECCOMP_CHANGED=0
+APK_CHANGED=0
+OLD_APK_PRESENT=0
+CUTOVER=0
+WAS_ACTIVE=0
+
+systemctl is-active --quiet "$CONTAINER" && WAS_ACTIVE=1 || true
+
+find_desktop_user() {
+	local uid path
+	for uid in $(ls /run/user 2>/dev/null); do
+		[[ $uid =~ ^[0-9]+$ ]] || continue
+		((uid >= 1000)) || continue
+		id -u "$uid" >/dev/null 2>&1 || continue
+		path=$(find "/run/user/$uid" -maxdepth 1 -type s -name 'wayland-*' -print -quit 2>/dev/null || true)
+		[[ -n $path ]] || continue
+		USER_NAME=$(getent passwd "$uid" | cut -d: -f1)
+		DISPLAY_NAME=${path##*/}
+		return 0
+	done
+	return 1
+}
+
+setup_user() {
+	[[ -n $USER_NAME ]] || find_desktop_user || return 1
+	USER_UID=$(id -u "$USER_NAME")
+	USER_GID=$(id -g "$USER_NAME")
+	USER_HOME=$(getent passwd "$USER_NAME" | cut -d: -f6)
+	RUNTIME="/run/user/$USER_UID"
+	return 0
+}
+
+u() {
+	runuser -u "$USER_NAME" -- env \
+		HOME="$USER_HOME" USER="$USER_NAME" LOGNAME="$USER_NAME" \
+		XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$DISPLAY_NAME" \
+		DBUS_SESSION_BUS_ADDRESS="unix:path=$RUNTIME/bus" \
+		PATH="$USER_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+		"$@"
+}
+
+u_at() { local dir=$1; shift; u bash -c 'cd "$1"; shift; exec "$@"' _ "$dir" "$@"; }
+
+android_shell() { timeout 30 waydroid shell -- "$@"; }
+
+apkcert_sha() { "$APKCERT" "$1" 2>/dev/null | sed -n 's/^sha256=//p' | head -n1; }
+
+wait_boot() {
+	local i out
+	for ((i = 0; i < 180; i++)); do
+		out=$(android_shell getprop sys.boot_completed 2>/dev/null || true)
+		[[ ${out//$'\r'/} == 1 ]] && return 0
+		sleep 2
+	done
+	return 1
+}
+
+start_android() {
+	SESSION_STARTED=1
+	systemctl start "$CONTAINER"
+	u nohup waydroid session start >"$BACKUP/session.log" 2>&1 </dev/null &
+	SESSION_PID=$!
+	wait_boot || die 'Waydroid did not complete boot within 360 seconds.'
+}
+
+restore_file() {
+	local name=$1 dest=$2
+	if [[ -f $BACKUP/$name ]]; then
+		mkdir -p "$(dirname "$dest")"
+		cp -a "$BACKUP/$name" "$dest"
+	else
+		rm -f "$dest"
+	fi
+}
+
+rollback() {
+	warn 'Rolling back the changes made by this run.'
+	((SESSION_STARTED)) && u waydroid session stop || true
+	systemctl stop "$CONTAINER" || true
+	if ((SECCOMP_CHANGED)); then restore_file seccomp "$SECCOMP_FILE"; fi
+	if ((APK_CHANGED)); then
+		systemctl start "$CONTAINER" || return 1
+		u nohup waydroid session start >"$BACKUP/rollback-session.log" 2>&1 </dev/null &
+		wait_boot || return 1
+		android_shell pm uninstall "$MANAGER_PKG" || true
+		if ((OLD_APK_PRESENT)); then
+			install -o "$USER_UID" -g "$USER_GID" -m 600 \
+				"$BACKUP/manager-before.apk" "$BACKUP/manager-rollback.apk"
+			u waydroid app install "$BACKUP/manager-rollback.apk" || return 1
+		fi
+	fi
+	if ((WAS_ACTIVE)); then
+		systemctl start "$CONTAINER" || true
+	else
+		((SESSION_STARTED)) && u waydroid session stop || true
+		systemctl stop "$CONTAINER" || true
+	fi
+	warn 'Rollback done. Package installs and erased Manager settings are not reversed.'
+}
+
+finish() {
+	local rc=$?
+	trap - EXIT ERR INT TERM
+	if ((rc != 0)); then
+		set +e
+		if ((CUTOVER)); then
+			rollback || warn 'ROLLBACK INCOMPLETE: inspect the saved backups/log.'
+		elif ((SESSION_STARTED && !WAS_ACTIVE)); then
+			u waydroid session stop || true
+			systemctl stop "$CONTAINER" || true
+		fi
+		printf '[%s] FAILED, exit=%s. Backups/log: %s\n' "$(date '+%F %T')" "$rc" "$BACKUP" >&2
+	else
+		[[ -z $BACKUP ]] || log "Backups and logs: $BACKUP"
+	fi
+	exit "$rc"
+}
+trap 'printf "[%s] Command failed at line %s\n" "$(date "+%F %T")" "$LINENO" >&2' ERR
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# --- preflight ---------------------------------------------------------------
+
+[[ -f $APK ]] || die "Packaged Manager missing: $APK"
+[[ -f $CERT ]] || die "Packaged certificate missing: $CERT"
+[[ -f $MANIFEST ]] || die "Packaged manifest missing: $MANIFEST"
+[[ -x $APKCERT ]] || die "Packaged apkcert helper missing: $APKCERT"
+command -v python3 >/dev/null || die 'python3 is required to read the APK certificate.'
+
+MANAGER_PKG=$(sed -n 's/^manager_package=//p' "$MANIFEST")
+MANAGER_CODE=$(sed -n 's/^manager_code=//p' "$MANIFEST")
+CERT_SIZE=$(sed -n 's/^certificate_size=//p' "$MANIFEST")
+CERT_HASH=$(sed -n 's/^certificate_sha256=//p' "$MANIFEST")
+[[ -n $MANAGER_PKG && -n $MANAGER_CODE && -n $CERT_SIZE && -n $CERT_HASH ]] \
+	|| die "Incomplete manifest: $MANIFEST"
+
+# The packaged cert must still match the packaged APK, or the module and the
+# Manager have silently drifted apart.
+ACTUAL_HASH=$(sha256sum "$CERT" | awk '{print $1}')
+[[ $ACTUAL_HASH == "$CERT_HASH" ]] || die 'Packaged certificate does not match the manifest.'
+ACTUAL_SIZE=$(printf '0x%04x' "$(stat -c %s "$CERT")")
+[[ $ACTUAL_SIZE == "$CERT_SIZE" ]] || die 'Packaged certificate size does not match the manifest.'
+
+APK_CERT_HASH=$(apkcert_sha "$APK") || die "Could not read the packaged APK's signing certificate."
+[[ $APK_CERT_HASH == "$CERT_HASH" ]] \
+	|| die "Packaged Manager is signed with $APK_CERT_HASH but the module expects $CERT_HASH."
+
+install -d -m 700 "$STATE"
+exec 9>"$STATE/apply.lock"
+flock -n 9 || die 'Another kernelsu-waydroid apply run is in progress.'
+
+KERNEL=$(uname -r)
+
+# A stale /etc/dkms override can silently win over the packaged dkms.conf and
+# build a module that rejects the packaged Manager. Refuse rather than guess.
+for override in /etc/dkms/kernelsu*.conf; do
+	[[ -e $override ]] || continue
+	if grep -q 'KSU_EXPECTED_HASH' "$override"; then
+		want=$(grep -o 'KSU_EXPECTED_HASH=[0-9a-f]*' "$override" | head -n1 | cut -d= -f2)
+		if [[ $want != "$CERT_HASH" ]]; then
+			die "Conflicting DKMS override $override pins a different Manager certificate ($want). Remove or update it."
+		fi
+		warn "DKMS override $override agrees with the packaged certificate."
+	fi
+done
+
+if ! modinfo -n "$MODULE_NAME" >/dev/null 2>&1; then
+	defer "No kernelsu module available for running kernel $KERNEL."
+fi
+MODULE_FILE=$(modinfo -n "$MODULE_NAME")
+log "Module for $KERNEL: $MODULE_FILE"
+
+if ((ALLOW_MODULE_SWAP == 0)) && [[ -d /sys/module/kernelsu ]]; then
+	loaded_ver=$(modinfo -F version "$MODULE_NAME" 2>/dev/null || true)
+	warn "kernelsu is already loaded (version ${loaded_ver:-unknown}). Live module replacement is disabled; reboot to pick up a new module build."
+fi
+
+if [[ -f $SECCOMP ]]; then
+	SECCOMP_FILE=$SECCOMP
+elif [[ -f $SECCOMP_ALT ]]; then
+	SECCOMP_FILE=$SECCOMP_ALT
+else
+	defer 'Waydroid seccomp profile not found; Waydroid may not be initialized yet.'
+fi
+[[ -f $LXCCONF ]] || defer 'Waydroid LXC configuration missing; Waydroid may not be initialized yet.'
+
+if [[ ! -f /var/lib/waydroid/waydroid.cfg ]]; then
+	defer 'Waydroid is not initialized.'
+fi
+
+setup_user || defer 'No logged-in Wayland desktop user found.'
+
+BACKUP="$BACKUP_ROOT/$RUN_ID"
+mkdir -p "$BACKUP"
+chmod 700 "$BACKUP"
+log "State directory: $STATE"
+log "Desktop user: $USER_NAME (Wayland display $DISPLAY_NAME)"
+
+cp -a "$SECCOMP_FILE" "$BACKUP/seccomp"
+cp -a "$LXCCONF" "$BACKUP/lxc-config"
+
+# --- capability precondition -------------------------------------------------
+
+KEEP=$(sed -n 's/^[[:space:]]*lxc\.cap\.keep[[:space:]]*=[[:space:]]*//p' "$LXCCONF" | tr '\n' ' ')
+[[ -n $KEEP && ! " $KEEP " =~ [[:space:]]sys_boot[[:space:]] && ! " $KEEP " =~ [[:space:]]all[[:space:]] ]] \
+	|| die 'Waydroid has no restrictive lxc.cap.keep allowlist without CAP_SYS_BOOT; refusing to touch the seccomp profile.'
+
+# --- seccomp -----------------------------------------------------------------
+
+log 'Applying the narrow seccomp change (allow reboot(2) to the container).'
+SECCOMP_CHANGED=1
+python3 - "$SECCOMP_FILE" <<-'PY'
+	import re, sys
+	from pathlib import Path
+
+	p = Path(sys.argv[1])
+	s = p.read_text()
+	assert re.search(r"^blacklist\s*$", s, re.M), "unexpected seccomp policy type"
+	out = "".join(
+	    line for line in s.splitlines(keepends=True)
+	    if not re.fullmatch(r"\s*reboot\s*(?:#.*)?", line.strip())
+	)
+	if out != s:
+	    p.write_text(out)
+PY
+
+# --- cutover -----------------------------------------------------------------
+
+CUTOVER=1
+
+log 'Restarting Waydroid so it picks up the module and the new seccomp profile.'
+u waydroid session stop || true
+systemctl stop "$CONTAINER"
+
+if [[ ! -d /sys/module/kernelsu ]]; then
+	log 'Loading kernelsu for the running kernel.'
+	load-kernelsu || die 'Could not load the kernelsu module.'
+	[[ -d /sys/module/kernelsu ]] || die 'kernelsu did not appear in /sys/module after loading.'
+fi
+
+LOAD_SINCE=$(date '+%Y-%m-%d %H:%M:%S')
+journalctl -k -b --since "$LOAD_SINCE" --no-pager >"$BACKUP/module-load.log" || true
+
+start_android
+
+BOUND=$(android_shell sh -c 'awk "/^CapBnd:/ {print \$2}" /proc/1/status' | tr -d '\r\n')
+python3 - "$BOUND" <<-'PY'
+	import sys
+	assert sys.argv[1], "could not read the container capability bounding set"
+	assert not (int(sys.argv[1], 16) & (1 << 22)), "container still has CAP_SYS_BOOT"
+PY
+
+# --- Manager -----------------------------------------------------------------
+
+mapfile -t paths < <(android_shell pm path "$MANAGER_PKG" | tr -d '\r' | sed -n 's/^package://p')
+	OLD_CERT_HASH=
+	if ((${#paths[@]})); then
+		((${#paths[@]} == 1)) || die 'Split Manager APK detected; refusing an incomplete backup.'
+		android_shell cat "${paths[0]}" >"$BACKUP/manager-before.apk"
+		OLD_CERT_HASH=$(apkcert_sha "$BACKUP/manager-before.apk") \
+			|| die 'Could not determine the installed Manager certificate.'
+		OLD_APK_PRESENT=1
+		log "Installed Manager certificate: $OLD_CERT_HASH"
+	fi
+
+log "Installing the packaged Manager (certificate $CERT_HASH)."
+APK_CHANGED=1
+if ((OLD_APK_PRESENT)) && [[ $OLD_CERT_HASH != "$CERT_HASH" ]]; then
+	if [[ $ALLOW_MANAGER_REPLACE != 1 ]]; then
+		die "Installed Manager is signed with a different key. Replacing it resets its app-local settings.
+Set KSU_ALLOW_MANAGER_REPLACE=1 in the service environment to allow this, or uninstall $MANAGER_PKG manually."
+	fi
+	log 'Signing key changed; replacing Manager (its app-local settings will reset).'
+	out=$(android_shell pm uninstall "$MANAGER_PKG")
+	[[ $out == *Success* ]] || die "Manager uninstall failed: $out"
+fi
+
+install -o "$USER_UID" -g "$USER_GID" -m 644 "$APK" "$BACKUP/manager.apk"
+u waydroid app install "$BACKUP/manager.apk" || die 'waydroid app install failed.'
+
+INFO=$(android_shell dumpsys package "$MANAGER_PKG")
+grep -Eq "versionCode=$MANAGER_CODE([[:space:]]|$)" <<<"$INFO" \
+	|| die "Installed Manager versionCode is not $MANAGER_CODE."
+MANAGER_UID=$(sed -n 's/.*userId=\([0-9]*\).*/\1/p' <<<"$INFO" | head -n1)
+[[ -n $MANAGER_UID ]] || die 'Could not resolve the Manager UID.'
+
+VERIFY_SINCE=$(date '+%Y-%m-%d %H:%M:%S')
+android_shell am force-stop "$MANAGER_PKG"
+out=$(android_shell am start -W -n "$MANAGER_PKG/$MANAGER_PKG.ui.MainActivity")
+[[ $out != *Error:* ]] || die "Manager launch failed: $out"
+
+RECOGNIZED=0
+for ((i = 0; i < 30; i++)); do
+	journalctl -k -b --since "$VERIFY_SINCE" --no-pager >"$BACKUP/manager-check.log"
+	if grep -Eq "install fd for manager:?[[:space:]]+$MANAGER_UID([[:space:]]|$)" \
+		"$BACKUP/manager-check.log"; then
+		RECOGNIZED=1
+		break
+	fi
+	sleep 2
+done
+((RECOGNIZED)) || die 'The Manager was not recognized by the kernel; see the module-load log.'
+
+printf 'applied=%s\nkernel=%s\nmodule=%s\nmanager_package=%s\nmanager_uid=%s\ncertificate_sha256=%s\n' \
+	"$(date -Iseconds)" "$KERNEL" "$MODULE_FILE" "$MANAGER_PKG" "$MANAGER_UID" "$CERT_HASH" \
+	>"$STATE/last-applied.txt"
+
+CUTOVER=0
+log "SUCCESS: Manager $MANAGER_PKG (UID $MANAGER_UID) recognized by kernelsu on $KERNEL."
+log 'No Android apps were granted root automatically.'

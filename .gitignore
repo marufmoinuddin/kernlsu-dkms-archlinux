@@ -1,10 +1,6 @@
-# Sources
-kernelsu/
-kernelsu.part/
-*.gz
-
-# Download agent
-DLAGENTS
+# Git sources (VCS checkouts created by makepkg)
+/kernelsu/
+/kernelsu.part/
 
 # Build directories
 /src/
@@ -12,6 +8,12 @@ DLAGENTS
 
 # Build artifacts
 *.pkg.tar*
+*.part
+*.sig
+
+# Python bytecode (apkcert is compiled during testing)
+/__pycache__/
+*.pyc
 
 # Editor
 /.vscode/

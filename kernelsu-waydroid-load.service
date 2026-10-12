@@ -1,0 +1,17 @@
+[Unit]
+Description=Load the KernelSU module before Waydroid starts
+DefaultDependencies=no
+Before=waydroid-container.service
+After=systemd-modules-load.service local-fs.target
+ConditionPathExists=/usr/bin/load-kernelsu
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The helper always exits successfully: a load failure must not keep Waydroid
+# from starting, and loading KernelSU on some x86_64 kernels has been reported
+# to panic. kernelsu-waydroid-apply.service reports the problem separately.
+ExecStart=/usr/lib/kernelsu-waydroid/load
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Apply the packaged KernelSU Manager to Waydroid
+After=waydroid-container.service
+Requires=waydroid-container.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/kernelsu-waydroid/apply
+TimeoutStartSec=1800
+# Replacing the Manager resets its app-local settings when the signing key
+# changed. Off by default; enable here if you accept that.
+Environment=KSU_ALLOW_MANAGER_REPLACE=0

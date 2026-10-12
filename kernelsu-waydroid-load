@@ -1,0 +1,24 @@
+#!/bin/sh
+# Load the kernelsu module for the running kernel, if it is not loaded yet.
+#
+# Never unloads and reloads: on some x86_64 kernels unloading a live KernelSU
+# can panic. If the module is already present we leave it alone.
+#
+# Always exits 0. A failure here must not block waydroid-container.service;
+# kernelsu-waydroid-apply.service reports the problem separately.
+set -u
+
+if grep -q '^kernelsu ' /proc/modules; then
+	exit 0
+fi
+
+if [ ! -x /usr/bin/load-kernelsu ]; then
+	echo "kernelsu-waydroid-load: /usr/bin/load-kernelsu is missing" >&2
+	exit 0
+fi
+
+if ! /usr/bin/load-kernelsu; then
+	echo "kernelsu-waydroid-load: load-kernelsu failed for $(uname -r)" >&2
+fi
+
+exit 0

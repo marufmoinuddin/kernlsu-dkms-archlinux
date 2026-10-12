@@ -1,0 +1,15 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = kernelsu-dkms
+
+[Action]
+Description = Scheduling the KernelSU integration with Waydroid...
+When = PostTransaction
+# Numbered after 70-dkms-install.hook and 30-systemd-daemon-reload-system.hook
+# so the module is built and the units are known before this runs.
+Depends = systemd
+Exec = /usr/bin/systemctl --quiet enable --now kernelsu-waydroid-apply.timer
+Exec = /usr/bin/systemctl --quiet start kernelsu-waydroid-load.service
+Exec = /usr/bin/systemctl --no-block start kernelsu-waydroid-apply.service
