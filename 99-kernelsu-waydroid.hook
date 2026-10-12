@@ -10,6 +10,5 @@ When = PostTransaction
 # Numbered after 70-dkms-install.hook and 30-systemd-daemon-reload-system.hook
 # so the module is built and the units are known before this runs.
 Depends = systemd
-Exec = /usr/bin/systemctl --quiet enable --now kernelsu-waydroid-apply.timer
-Exec = /usr/bin/systemctl --quiet start kernelsu-waydroid-load.service
-Exec = /usr/bin/systemctl --no-block start kernelsu-waydroid-apply.service
+# alpm keeps only the last Exec line of a hook, so the steps live in a script.
+Exec = /usr/lib/kernelsu-waydroid/post-install

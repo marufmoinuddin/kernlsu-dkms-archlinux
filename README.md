@@ -103,7 +103,7 @@ After that capture, builds are fully unattended. So the usual case is just:
 makepkg -s
 ```
 
-Credentials live in `~/.config/kernelsu-waydroid/`:
+Credentials live in `.keys/` next to this `PKGBUILD`:
 
 ```
 manager.p12        the private key
@@ -113,6 +113,7 @@ manager-password   its password
 Keep that directory safe. Anyone with both files can sign a Manager your kernel
 will accept. The build never copies either file into the package, the package
 archive, or the build log — only the signed APK and the public certificate.
+`.keys/` is gitignored.
 
 The build will **never** silently replace an existing key. If it cannot unlock
 one it stops and tells you, rather than generating a password that does not
@@ -147,15 +148,11 @@ at it. Otherwise you will be asked for the password once.
 ## Android SDK
 
 The build needs SDK platform `android-37.0`, build-tools `37.0.0`, NDK
-`29.0.14206865` and CMake `3.22.1` in an SDK directory. Default:
-`~/Android/Sdk`, override with `KSU_SDK`.
-
-If components are missing the build stops and tells you exactly what to install.
-To let it install them itself (this accepts the SDK licence prompts for you):
-
-```bash
-KSU_SDK_AUTO_PROVISION=1 makepkg -s
-```
+`29.0.14206865` and CMake `3.22.1`. They are installed into `sdk/` next to this
+`PKGBUILD` on the first build (this accepts the SDK licence prompts for you) and
+reused afterwards, so plain `makepkg -s` is enough. Set `KSU_SDK` to use a
+different SDK root, or `KSU_SDK_AUTO_PROVISION=0` to make a missing component a
+hard error instead of a download.
 
 ## When the integration does not run
 

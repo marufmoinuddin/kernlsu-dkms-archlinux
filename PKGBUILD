@@ -4,7 +4,7 @@
 _pkg=kernelsu
 pkgname=${_pkg}-dkms
 pkgver=3.3.0+77+gd8de2e37
-pkgrel=4
+pkgrel=7
 _commit=d8de2e37a85d2c4c99bc854fb0596bb02a13eb6e
 # Bundled so this package has no AUR-only dependency: `makepkg -s` resolves
 # deps with pacman, which cannot see the AUR, and the AUR modloader package is
@@ -19,8 +19,6 @@ license=('GPL-2.0-only' 'GPL-3.0-or-later')
 depends=('dkms' 'waydroid')
 makedepends=(
 	'git'
-	'rust'
-	'cargo'
 	'rustup'
 	'clang'
 	'llvm'
@@ -36,10 +34,11 @@ makedepends=(
 options=('!strip' '!emptydirs')
 
 # --- Android build environment -------------------------------------------------
-# Override KSU_SDK to point at a different SDK root. Set KSU_SDK_AUTO_PROVISION=1
-# to let the build install the pinned SDK components itself (accepts the SDK
-# license prompts on your behalf).
-_sdk="${KSU_SDK:-$HOME/Android/Sdk}"
+# The SDK components are only needed to build this package, so they live in a
+# `sdk/` directory next to the PKGBUILD and are reused by later builds. Point
+# KSU_SDK elsewhere to override, or set KSU_SDK_AUTO_PROVISION=0 to make a
+# missing component a hard error instead of an automatic download.
+_sdk="${KSU_SDK:-${startdir:-$PWD}/sdk}"
 _ndk_ver=29.0.14206865
 _cmake_ver=3.22.1
 _platform=android-37.0
@@ -48,19 +47,27 @@ _ksud_triple=x86_64-linux-android
 _ksud_min_api=26
 _android_cli=/opt/android-sdk/cmdline-tools/latest/bin/android
 
+# --- Rust toolchain -----------------------------------------------------------
+# `rust` and `rustup` conflict on /usr/bin/cargo, so makepkg installs `rustup`,
+# whose shims refuse to run until $RUSTUP_HOME has a default toolchain. A fresh
+# install has none and every cargo call dies with "rustup could not choose a
+# version of cargo". Select one explicitly instead of relying on user state.
+_ksu_rust_toolchain="${KSU_RUST_TOOLCHAIN:-stable}"
+
 _manager_pkg=me.weishu.kernelsu
 _manager_code=32678
 
 # --- Signing ------------------------------------------------------------------
-# Credentials live outside $srcdir and $pkgdir and are never packaged: only the
-# signed APK and the public certificate end up in the package. Reuse the same
-# key across rebuilds, otherwise the certificate baked into the module stops
-# matching the Manager and the Manager has to be reinstalled.
+# Credentials live in `.keys/` next to this PKGBUILD, outside $srcdir and
+# $pkgdir, and are never packaged: only the signed APK and the public
+# certificate end up in the package. Reuse the same key across rebuilds,
+# otherwise the certificate baked into the module stops matching the Manager and
+# the Manager has to be reinstalled. `.keys/` is gitignored.
 #
 # Established by _ksu_ensure_signing_credentials(), which runs first in build().
 _ksu_ensure_signing_credentials() {
-	export KSU_KEYSTORE="${KSU_KEYSTORE:-$HOME/.config/kernelsu-waydroid/manager.p12}"
-	export KSU_PASSWORD_FILE="${KSU_PASSWORD_FILE:-$HOME/.config/kernelsu-waydroid/manager-password}"
+	export KSU_KEYSTORE="${KSU_KEYSTORE:-${startdir:-$PWD}/.keys/manager.p12}"
+	export KSU_PASSWORD_FILE="${KSU_PASSWORD_FILE:-${startdir:-$PWD}/.keys/manager-password}"
 	export KSU_KEY_ALIAS="${KSU_KEY_ALIAS:-waydroid-ksu}"
 
 	local keytool=/usr/lib/jvm/java-21-openjdk/bin/keytool
@@ -227,6 +234,7 @@ source=(
 	'kernelsu-waydroid-load.service'
 	'waydroid-container-kernelsu.conf'
 	'99-kernelsu-waydroid.hook'
+	'post-install'
 )
 
 sha256sums=(
@@ -238,13 +246,14 @@ sha256sums=(
 	'05feaafbbac794a68c7eeea8c0a4c5616fc9f6ef7e4b7540baf3f5d43fad5fb0'
 	'92065b3f1736bfc2dbd0411f4fd0c654582a3c8a71df7738e2e78536dc5a08d0'
 	'1135dc25d2f54ec0eb73f63eac8916dd2969343048697cbddba785151659c359'
-	'62809db670341a389c3b13229e97cc62b9a754eb316be4a5960dc5e357f5fa3e'
+	'2d2b3ee1164996d73b08c1360b50c5d3e5cf3de0f7823da1ce108cd43a19ba63'
 	'de5fb825cf5444fff5b8f975b438c68240ff6f34d30be9fc4d1d6cac7829f58e'
-	'19a30682d3165c5c639a018f08624b7e6dedfe49c0bd668bdd59e635a41b18ed'
+	'4f53ea853324912142ec6d070e15e5930b45318e809e94d36bf8776a91ac92e7'
 	'83c8a7e9ad39e7f55a2701279d382bf83845a8acaf08dbb84e15944e779dc4b0'
 	'eb80c60f29eb6eac39be1aeb77cb9ccfc46dac0e8bac6162f7aabcab3c631923'
 	'93f5a95f88351cdac45ba9ff738d089f60fb5d1f5f1742ccd152b90d311ac5b2'
-	'8ef8abd9ecd5b3ac52f7f0457ca41b36d23d4fc91802bc2edf6d8af0a150a499'
+	'0d7a6ba9f84316ab06baf6a9d61b84ede5d6ef04d5ef7d57d3094337b46d9cfe'
+	'31bab6d5436f930a32c6d7489aa7f96b1c817a4a507e37336160717bc82c8c9d'
 )
 
 prepare() {
@@ -285,8 +294,8 @@ check_sdk() {
 		"ndk/$_ndk_ver" \
 		"cmake/$_cmake_ver"; do
 		if [[ ! -d "$_sdk/$p" ]]; then
-			if [[ ${KSU_SDK_AUTO_PROVISION:-0} == 1 ]]; then
-				printf '==> provisioning SDK component %s\n' "$p"
+			if [[ ${KSU_SDK_AUTO_PROVISION:-1} != 0 ]]; then
+				printf '==> provisioning SDK component %s into %s\n' "$p" "$_sdk"
 				sdk_install "$p" || return 1
 			else
 				{
@@ -294,7 +303,7 @@ check_sdk() {
 					printf 'Provision it with:\n'
 					printf '  yes | %s --sdk=%s sdk install %s\n\n' \
 						"$_android_cli" "$_sdk" "$p"
-					printf 'or rebuild with KSU_SDK_AUTO_PROVISION=1 to do it automatically.\n'
+					printf 'or set KSU_SDK_AUTO_PROVISION=0 to keep this a hard error.\n'
 				} >&2
 				return 1
 			fi
@@ -302,12 +311,24 @@ check_sdk() {
 	done
 }
 
+rust_ensure_toolchain() {
+	command -v rustup >/dev/null || return 0
+	if ! rustup toolchain list 2>/dev/null | grep -q "^$_ksu_rust_toolchain"; then
+		printf '==> installing rust toolchain %s\n' "$_ksu_rust_toolchain"
+		rustup toolchain install "$_ksu_rust_toolchain" --profile minimal ||
+			return 1
+	fi
+	export RUSTUP_TOOLCHAIN="$_ksu_rust_toolchain"
+}
+
 build_ksuinit() {
+	rust_ensure_toolchain || return 1
 	cd "$srcdir/$_pkg/userspace/ksuinit"
 	cargo build --release --target-dir .
 }
 
 build_ksud() {
+	rust_ensure_toolchain || return 1
 	cd "$srcdir/$_pkg"
 	rustup target add "$_ksud_triple"
 	# setup-rust-build.sh derives the NDK paths from ANDROID_NDK_HOME.
@@ -316,12 +337,20 @@ build_ksud() {
 	source .github/scripts/setup-rust-build.sh "$_ksud_triple" "$_ksud_min_api"
 	# Output lands in $srcdir/$_pkg/target/$_ksud_triple/release/ksud, which is
 	# where repack_apk.py looks for it.
-	cargo build --locked --release --target "$_ksud_triple" \
-		--manifest-path userspace/ksud/Cargo.toml
+	#
+	# Upstream's release profile turns on fat LTO, which rustc's LLVM currently
+	# crashes on in libbz2-rs-sys ("rustc-LLVM ERROR: Cannot select:
+	# sign_extend"). Thin LTO keeps the optimisation and compiles; drop LTO
+	# entirely if a future rustc trips over that too.
+	local manifest=userspace/ksud/Cargo.toml
+	CARGO_PROFILE_RELEASE_LTO=thin cargo build --locked --release \
+		--target "$_ksud_triple" --manifest-path "$manifest" && return 0
+	printf 'warning: ksud build with LTO failed, retrying without LTO\n' >&2
+	CARGO_PROFILE_RELEASE_LTO=false cargo build --locked --release \
+		--target "$_ksud_triple" --manifest-path "$manifest"
 }
 
 build_manager() {
-	check_sdk
 	printf 'sdk.dir=%s\n' "$_sdk" >"$srcdir/$_pkg/manager/local.properties"
 	cd "$srcdir/$_pkg/manager"
 	./gradlew --no-daemon assembleRelease -PIS_PR_BUILD=false
@@ -462,6 +491,10 @@ build() {
 	# and generate or capture the signing key before anything needs it.
 	_ksu_ensure_signing_credentials || return 1
 
+	# Likewise for the SDK: build_ksud needs the NDK's clang wrappers, and
+	# without them cargo fails deep in a -sys crate after minutes of compiling.
+	check_sdk || return 1
+
 	build_ksuinit
 	build_modloader
 	build_ksud
@@ -533,6 +566,10 @@ package() {
 		"$pkgdir/usr/lib/kernelsu-waydroid/load"
 	install -Dm755 "$srcdir/apkcert" \
 		"$pkgdir/usr/lib/kernelsu-waydroid/apkcert"
+	# Target of the alpm hook: alpm honours a single Exec line, so all three
+	# post-transaction steps live in this script.
+	install -Dm755 "$srcdir/post-install" \
+		"$pkgdir/usr/lib/kernelsu-waydroid/post-install"
 
 	# systemd units
 	install -Dm644 "$srcdir/kernelsu-waydroid-apply.service" \

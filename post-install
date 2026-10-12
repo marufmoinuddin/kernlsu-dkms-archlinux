@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Post-transaction entry point for 99-kernelsu-waydroid.hook.
+#
+# alpm hook files honour a single Exec line (later ones silently overwrite the
+# first), so every step has to live in a script like this one. Runs as root
+# during a pacman transaction: keep it fast, keep it quiet, and never fail the
+# transaction, because the apply timer retries the real work anyway.
+set -u
+
+run() {
+	local what=$1
+	shift
+	"$@" >/dev/null 2>&1 ||
+		printf '==> kernelsu-dkms: %s failed: %s\n' "$what" "$*" >&2
+}
+
+run 'enable the retry timer' \
+	systemctl --quiet enable --now kernelsu-waydroid-apply.timer
+# enable, not just start: the loader has to be in place before Waydroid comes
+# up on every boot, not only on the one where the package was installed.
+run 'enable the module loader' \
+	systemctl --quiet enable --now kernelsu-waydroid-load.service
+# --no-block: the service waits for a logged-in Wayland session, which pacman
+# transactions outlive.
+run 'schedule the first integration run' \
+	systemctl --quiet --no-block start kernelsu-waydroid-apply.service
+
+exit 0

@@ -240,7 +240,10 @@ setup_user || defer 'No logged-in Wayland desktop user found.'
 
 BACKUP="$BACKUP_ROOT/$RUN_ID"
 mkdir -p "$BACKUP"
-chmod 700 "$BACKUP"
+# 711, not 700: the desktop user runs `waydroid app install` against files in
+# here, and root-only traversal makes that fail with EACCES. The directory
+# still cannot be listed, and every file keeps its own owner and mode.
+chmod 711 "$BACKUP"
 log "State directory: $STATE"
 log "Desktop user: $USER_NAME (Wayland display $DISPLAY_NAME)"
 
@@ -324,7 +327,12 @@ Set KSU_ALLOW_MANAGER_REPLACE=1 in the service environment to allow this, or uni
 fi
 
 install -o "$USER_UID" -g "$USER_GID" -m 644 "$APK" "$BACKUP/manager.apk"
-u waydroid app install "$BACKUP/manager.apk" || die 'waydroid app install failed.'
+# Report the CLI's own message: without it the journal only ever shows a bare
+# "waydroid app install failed.", which says nothing about why.
+if ! out=$(u waydroid app install "$BACKUP/manager.apk" 2>&1); then
+	printf '%s\n' "$out" >&2
+	die 'waydroid app install failed.'
+fi
 
 INFO=$(android_shell dumpsys package "$MANAGER_PKG")
 grep -Eq "versionCode=$MANAGER_CODE([[:space:]]|$)" <<<"$INFO" \

@@ -1,7 +1,10 @@
 [Unit]
 Description=Apply the packaged KernelSU Manager to Waydroid
 After=waydroid-container.service
-Requires=waydroid-container.service
+# Wants, not Requires: if the container is not running the script defers with a
+# readable message and the timer retries, instead of systemd failing the start
+# on a dependency the user never enabled.
+Wants=waydroid-container.service
 
 [Service]
 Type=oneshot
