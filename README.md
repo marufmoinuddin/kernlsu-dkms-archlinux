@@ -193,16 +193,16 @@ Then `sudo systemctl daemon-reload`.
 sudo pacman -Rns kernelsu-dkms
 ```
 
-Then restore the seccomp profile if you want it back:
+A `PreTransaction` hook cleans up before the files go away: it disables the
+retry timer and the module loader, restores the Waydroid seccomp profile from
+the newest backup in `/var/lib/kernelsu-waydroid/backups/`, and removes the
+Manager from the running container. The DKMS module is removed by dkms' own
+hook. The restored seccomp profile is read when the container starts, so
+restart Waydroid to pick it up.
 
-```bash
-sudo cp /var/lib/kernelsu-waydroid/backups/<run-id>/seccomp \
-        /var/lib/waydroid/lxc/waydroid/waydroid.seccomp
-sudo systemctl restart waydroid-container
-```
-
-You may also need to remove the Manager inside Waydroid
-(`waydroid shell pm uninstall me.weishu.kernelsu`).
+What the hook cannot do, it prints for you to run by hand: removing the Manager
+needs a live Waydroid session, and the state directory with the backups is left
+in place (it holds nothing the package owns).
 
 ## Troubleshooting
 

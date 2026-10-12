@@ -4,7 +4,7 @@
 _pkg=kernelsu
 pkgname=${_pkg}-dkms
 pkgver=3.3.0+77+gd8de2e37
-pkgrel=7
+pkgrel=8
 _commit=d8de2e37a85d2c4c99bc854fb0596bb02a13eb6e
 # Bundled so this package has no AUR-only dependency: `makepkg -s` resolves
 # deps with pacman, which cannot see the AUR, and the AUR modloader package is
@@ -234,12 +234,14 @@ source=(
 	'kernelsu-waydroid-load.service'
 	'waydroid-container-kernelsu.conf'
 	'99-kernelsu-waydroid.hook'
+	'98-kernelsu-waydroid-remove.hook'
 	'post-install'
+	'post-remove'
 )
 
 sha256sums=(
-	'SKIP'
-	'SKIP'
+	SKIP
+	SKIP
 	'a836794d044068ee44f0e60b4f45f4f58e810a23e79cb800b4cba1dd9004e369'
 	'a45b6d9b38cc0fa06ca3984999ddd6940f4b4e2a84a4fccbf7801784903ef762'
 	'bf325c92678f6e35b669f4a57b62f669b0c30b18c7d110a9df5164548ee7eff1'
@@ -253,7 +255,9 @@ sha256sums=(
 	'eb80c60f29eb6eac39be1aeb77cb9ccfc46dac0e8bac6162f7aabcab3c631923'
 	'93f5a95f88351cdac45ba9ff738d089f60fb5d1f5f1742ccd152b90d311ac5b2'
 	'0d7a6ba9f84316ab06baf6a9d61b84ede5d6ef04d5ef7d57d3094337b46d9cfe'
+	'5374966105f905e8d759105126aa64cf52cb2c4cd3a52bdb33b84cebd434ef01'
 	'31bab6d5436f930a32c6d7489aa7f96b1c817a4a507e37336160717bc82c8c9d'
+	'b703b3fa052289972913e452026de9e936bd213134cebb55df4b303167a3d304'
 )
 
 prepare() {
@@ -566,10 +570,12 @@ package() {
 		"$pkgdir/usr/lib/kernelsu-waydroid/load"
 	install -Dm755 "$srcdir/apkcert" \
 		"$pkgdir/usr/lib/kernelsu-waydroid/apkcert"
-	# Target of the alpm hook: alpm honours a single Exec line, so all three
-	# post-transaction steps live in this script.
+	# Targets of the alpm hooks: alpm honours a single Exec line per hook, so
+	# the post-transaction steps live in these scripts.
 	install -Dm755 "$srcdir/post-install" \
 		"$pkgdir/usr/lib/kernelsu-waydroid/post-install"
+	install -Dm755 "$srcdir/post-remove" \
+		"$pkgdir/usr/lib/kernelsu-waydroid/post-remove"
 
 	# systemd units
 	install -Dm644 "$srcdir/kernelsu-waydroid-apply.service" \
@@ -584,4 +590,6 @@ package() {
 	# Trigger the integration once the DKMS hooks have finished
 	install -Dm644 "$srcdir/99-kernelsu-waydroid.hook" \
 		"$pkgdir/usr/share/libalpm/hooks/99-kernelsu-waydroid.hook"
+	install -Dm644 "$srcdir/98-kernelsu-waydroid-remove.hook" \
+		"$pkgdir/usr/share/libalpm/hooks/98-kernelsu-waydroid-remove.hook"
 }

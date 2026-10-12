@@ -1,7 +1,7 @@
 pkgbase = kernelsu-dkms
 	pkgdesc = KernelSU as a DKMS module for container-based Android such as Waydroid, shipping a certificate-matched Manager
 	pkgver = 3.3.0+77+gd8de2e37
-	pkgrel = 7
+	pkgrel = 8
 	url = https://github.com/supechicken/KernelSU
 	arch = x86_64
 	license = GPL-2.0-only
@@ -37,7 +37,9 @@ pkgbase = kernelsu-dkms
 	source = kernelsu-waydroid-load.service
 	source = waydroid-container-kernelsu.conf
 	source = 99-kernelsu-waydroid.hook
+	source = 98-kernelsu-waydroid-remove.hook
 	source = post-install
+	source = post-remove
 	sha256sums = SKIP
 	sha256sums = SKIP
 	sha256sums = a836794d044068ee44f0e60b4f45f4f58e810a23e79cb800b4cba1dd9004e369
@@ -53,6 +55,8 @@ pkgbase = kernelsu-dkms
 	sha256sums = eb80c60f29eb6eac39be1aeb77cb9ccfc46dac0e8bac6162f7aabcab3c631923
 	sha256sums = 93f5a95f88351cdac45ba9ff738d089f60fb5d1f5f1742ccd152b90d311ac5b2
 	sha256sums = 0d7a6ba9f84316ab06baf6a9d61b84ede5d6ef04d5ef7d57d3094337b46d9cfe
+	sha256sums = 5374966105f905e8d759105126aa64cf52cb2c4cd3a52bdb33b84cebd434ef01
 	sha256sums = 31bab6d5436f930a32c6d7489aa7f96b1c817a4a507e37336160717bc82c8c9d
+	sha256sums = b703b3fa052289972913e452026de9e936bd213134cebb55df4b303167a3d304
 
 pkgname = kernelsu-dkms

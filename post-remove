@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Pre-removal entry point for 98-kernelsu-waydroid-remove.hook.
+#
+# Runs as root in a PreTransaction hook, i.e. while the package files are still
+# installed. Leaves nothing behind: the units are disabled, the seccomp profile
+# goes back to the copy taken before the first run, and the Manager is removed
+# from the container when a session is reachable.
+#
+# Everything is best effort. Removing a package must never fail over leftovers,
+# and the module itself is handled by the dkms hook.
+set -u
+
+readonly STATE=/var/lib/kernelsu-waydroid
+readonly BACKUP_ROOT="$STATE/backups"
+readonly SECCOMP=/var/lib/waydroid/lxc/waydroid/waydroid-seccomp
+readonly SECCOMP_ALT=/var/lib/waydroid/lxc/waydroid/waydroid.seccomp
+readonly CONTAINER=waydroid-container.service
+readonly MANAGER_PKG=me.weishu.kernelsu
+
+note() { printf '==> kernelsu-dkms: %s\n' "$*"; }
+
+run() {
+	local what=$1
+	shift
+	"$@" >/dev/null 2>&1 ||
+		note "$what failed: $*"
+}
+
+# --- units ---------------------------------------------------------------------
+
+run 'stopping the retry timer' \
+	systemctl --quiet disable --now kernelsu-waydroid-apply.timer
+run 'disabling the module loader' \
+	systemctl --quiet disable --now kernelsu-waydroid-load.service
+
+# --- seccomp profile -----------------------------------------------------------
+
+# Newest backup holds the profile as it was before the package ever ran. It is
+# only read when the container starts, so it can be restored in place; the
+# change takes effect at the next container start.
+if [[ -d $BACKUP_ROOT ]]; then
+	newest=$(ls -1d "$BACKUP_ROOT"/*/ 2>/dev/null | sort | tail -n1)
+	if [[ -n $newest && -f $newest/seccomp ]]; then
+		for target in "$SECCOMP" "$SECCOMP_ALT"; do
+			[[ -e $target ]] || continue
+			install -m 644 -o root -g root "$newest/seccomp" "$target" ||
+				note "could not restore $target"
+		done
+		note 'restored the pre-install Waydroid seccomp profile (applies at next container start)'
+	else
+		note 'no seccomp backup found, leaving the profile as it is'
+	fi
+else
+	note 'no state directory, nothing to restore'
+fi
+
+# --- Manager app inside Waydroid -----------------------------------------------
+
+# The app lives in the container's /data/app, so removing the package never
+# touches it. Remove it when a container and desktop session are reachable;
+# otherwise say what is left to do by hand.
+USER_NAME=
+for uid in $(ls /run/user 2>/dev/null); do
+	[[ $uid =~ ^[0-9]+$ ]] || continue
+	((uid >= 1000)) || continue
+	id -u "$uid" >/dev/null 2>&1 || continue
+	wayland=$(find "/run/user/$uid" -maxdepth 1 -type s -name 'wayland-*' -print -quit 2>/dev/null)
+	[[ -n $wayland ]] || continue
+	USER_NAME=$(getent passwd "$uid" | cut -d: -f1)
+	DISPLAY_NAME=${wayland##*/}
+	break
+done
+
+uninstall_manager() {
+	local runtime home
+	home=$(getent passwd "$USER_NAME" | cut -d: -f6)
+	runtime="/run/user/$uid"
+	runuser -u "$USER_NAME" -- env \
+		HOME="$home" USER="$USER_NAME" LOGNAME="$USER_NAME" \
+		XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="$DISPLAY_NAME" \
+		DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" \
+		PATH="$home/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+		timeout 30 waydroid shell -- pm uninstall "$MANAGER_PKG"
+}
+
+if [[ -n $USER_NAME ]] && systemctl is-active --quiet "$CONTAINER"; then
+	note "removing $MANAGER_PKG from Waydroid"
+	if ! uninstall_manager; then
+		note "could not remove $MANAGER_PKG; do it by hand with: waydroid shell -- pm uninstall $MANAGER_PKG"
+	fi
+else
+	note "left $MANAGER_PKG in Waydroid; remove it by hand with: waydroid shell -- pm uninstall $MANAGER_PKG"
+fi
+
+note 'the kernelsu DKMS module is removed by the dkms hook'
+exit 0

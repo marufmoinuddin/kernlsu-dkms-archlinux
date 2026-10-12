@@ -1,0 +1,13 @@
+[Trigger]
+Operation = Remove
+Type = Package
+Target = kernelsu-dkms
+
+[Action]
+Description = Cleaning up the KernelSU integration with Waydroid...
+# PreTransaction, so the helper script still exists: PostTransaction would run
+# after the package files are gone.
+When = PreTransaction
+Depends = systemd
+# alpm keeps only the last Exec line of a hook, so the work lives in a script.
+Exec = /usr/lib/kernelsu-waydroid/post-remove
