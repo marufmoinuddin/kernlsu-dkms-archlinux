@@ -4,7 +4,7 @@
 _pkg=kernelsu
 pkgname=${_pkg}-dkms
 pkgver=3.3.0+77+gd8de2e37
-pkgrel=11
+pkgrel=12
 _commit=d8de2e37a85d2c4c99bc854fb0596bb02a13eb6e
 # Bundled so this package has no AUR-only dependency: `makepkg -s` resolves
 # deps with pacman, which cannot see the AUR, and the AUR modloader package is
@@ -248,7 +248,7 @@ sha256sums=(
 	'05feaafbbac794a68c7eeea8c0a4c5616fc9f6ef7e4b7540baf3f5d43fad5fb0'
 	'92065b3f1736bfc2dbd0411f4fd0c654582a3c8a71df7738e2e78536dc5a08d0'
 	'1135dc25d2f54ec0eb73f63eac8916dd2969343048697cbddba785151659c359'
-	'2106558c296bce177139e7746990aa468b198f537d911ef134cd83662d4a8860'
+	'2904e9fde263ce6f3033d0320ba550370a6c87f62cff65ee08ecf235640bad93'
 	'de5fb825cf5444fff5b8f975b438c68240ff6f34d30be9fc4d1d6cac7829f58e'
 	'4f53ea853324912142ec6d070e15e5930b45318e809e94d36bf8776a91ac92e7'
 	'83c8a7e9ad39e7f55a2701279d382bf83845a8acaf08dbb84e15944e779dc4b0'

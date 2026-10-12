@@ -244,6 +244,50 @@ if [[ ! -f /var/lib/waydroid/waydroid.cfg ]]; then
 	defer 'Waydroid is not initialized.'
 fi
 
+# --- idempotency gate ---------------------------------------------------------
+# The retry timer runs this every 15 minutes. Everything below restarts the
+# Waydroid container, reinstalls the Manager and launches it, so without this
+# gate a perfectly healthy system would reboot its Android container 96 times a
+# day. Skip when nothing this script controls has changed since the last
+# successful run: same kernel, same module build, same Manager certificate,
+# seccomp already adjusted, and a recorded success. Anything that would need
+# redoing (new module, new certificate, failed run) leaves this false.
+module_fingerprint() {
+	[[ -f $1 ]] || {
+		printf 'missing'
+		return 0
+	}
+	stat -c '%s-%Y' "$1"
+}
+
+seccomp_needs_change() {
+	# The applied state is "reboot is gone from the policy"; a bare reboot line
+	# means the narrow change has not been made yet.
+	grep -Eq '^[[:space:]]*reboot[[:space:]]*$' "$SECCOMP_FILE"
+}
+
+already_applied() {
+	local last_kernel last_module last_cert last_manager
+	[[ -s $STATE/last-applied.txt ]] || return 1
+	last_kernel=$(sed -n 's/^kernel=//p' "$STATE/last-applied.txt" | head -n1)
+	last_module=$(sed -n 's/^module_fingerprint=//p' "$STATE/last-applied.txt" | head -n1)
+	last_cert=$(sed -n 's/^certificate_sha256=//p' "$STATE/last-applied.txt" | head -n1)
+	last_manager=$(sed -n 's/^manager_package=//p' "$STATE/last-applied.txt" | head -n1)
+	[[ $last_kernel == "$KERNEL" ]] || return 1
+	[[ $last_cert == "$CERT_HASH" ]] || return 1
+	[[ $last_manager == "$MANAGER_PKG" ]] || return 1
+	[[ $last_module == "$(module_fingerprint "$MODULE_FILE")" ]] || return 1
+	seccomp_needs_change && return 1
+	return 0
+}
+
+if [[ ${1:-} != --force ]] && already_applied; then
+	log "Already applied on $KERNEL with module $(module_fingerprint "$MODULE_FILE"); nothing to do."
+	log 'The container, the Manager and the seccomp profile are all in the packaged state.'
+	log 'Force a full cutover with: sudo /usr/lib/kernelsu-waydroid/apply --force'
+	exit 0
+fi
+
 setup_user || defer 'No logged-in Wayland desktop user found.'
 
 BACKUP="$BACKUP_ROOT/$RUN_ID"
@@ -393,8 +437,9 @@ done
 	die 'The Manager was not recognized by the kernel; see the module-load log.'
 }
 
-printf 'applied=%s\nkernel=%s\nmodule=%s\nmanager_package=%s\nmanager_uid=%s\ncertificate_sha256=%s\n' \
-	"$(date -Iseconds)" "$KERNEL" "$MODULE_FILE" "$MANAGER_PKG" "$MANAGER_UID" "$CERT_HASH" \
+printf 'applied=%s\nkernel=%s\nmodule=%s\nmodule_fingerprint=%s\nmanager_package=%s\nmanager_uid=%s\ncertificate_sha256=%s\n' \
+	"$(date -Iseconds)" "$KERNEL" "$MODULE_FILE" "$(module_fingerprint "$MODULE_FILE")" \
+	"$MANAGER_PKG" "$MANAGER_UID" "$CERT_HASH" \
 	>"$STATE/last-applied.txt"
 
 CUTOVER=0

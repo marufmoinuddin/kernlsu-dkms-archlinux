@@ -158,12 +158,31 @@ hard error instead of a download.
 
 `kernelsu-waydroid-apply` needs a logged-in Wayland user and a module built for
 the running kernel. If either is missing at install time it **defers** instead of
-failing, and a timer retries every 15 minutes. To run it by hand:
+failing, and a timer retries every 15 minutes.
+
+The timer run is normally a no-op: the script first checks whether anything it
+controls has changed since the last successful run — same kernel, same module
+build, same Manager certificate, seccomp profile already adjusted, last run
+succeeded — and exits without touching Waydroid. That is deliberate, because the
+full cutover stops and restarts the Waydroid container and relaunches the
+Manager.
+
+To run it by hand (also a no-op when everything is in place):
 
 ```bash
 sudo systemctl start kernelsu-waydroid-apply.service
 sudo journalctl -u kernelsu-waydroid-apply -f
 ```
+
+To force the full cutover, e.g. after removing the Manager inside Waydroid by
+hand:
+
+```bash
+sudo /usr/lib/kernelsu-waydroid/apply --force
+```
+
+The `--force` flag cannot be passed through `systemctl start`, which is why the
+script takes it as an argument.
 
 An "Existing KernelSU keystore has no password file" style error here means the
 capture step never ran; see [Signing key](#signing-key).
