@@ -182,8 +182,9 @@ build_signed_manager() {
 	keystore=$(realpath -e "$_keystore") || {
 		printf 'error: keystore not found: %s\n' "$_keystore" >&2
 		printf 'Set KSU_KEYSTORE, or create one with:\n' >&2
-		printf '  keytool -genkeypair -keystore %%s -storetype PKCS12 -alias %s \\\n' "$_key_alias" >&2
-		printf '    -keyalg RSA -keysize 2048 -validity 10000 -dname CN=Waydroid-KernelSU\n' >&2
+		printf '  keytool -genkeypair -keystore %s -storetype PKCS12 \\\n' "$_keystore" >&2
+		printf '    -alias %s -keyalg RSA -keysize 2048 -validity 10000 \\\n' "$_key_alias" >&2
+		printf '    -dname CN=Waydroid-KernelSU\n' >&2
 		return 1
 	}
 	password_file=$(realpath -e "$_password_file") || {
