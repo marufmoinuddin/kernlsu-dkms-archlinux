@@ -1,6 +1,8 @@
 # Git sources (VCS checkouts created by makepkg)
 /kernelsu/
 /kernelsu.part/
+/modloader/
+/modloader.part/
 modloader/
 # Build directories
 /src/
