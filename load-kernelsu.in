@@ -20,6 +20,15 @@ if ! grep -wq ext4 /proc/modules; then
   modprobe ext4
 fi
 
+# Shipped by this package, but a stray modprobe on $PATH could shadow it.
+MODLOADER=/usr/bin/modloader
+if [ ! -x "$MODLOADER" ]; then
+  MODLOADER=$(command -v modloader) || {
+    echo "${0##*/}: modloader not found. Reinstall $(basename "$0") package." >&2
+    exit 1
+  }
+fi
+
 case "$1" in
 -d|--unload-first) if lsmod | grep -q kernelsu; then
   rmmod kernelsu
@@ -33,4 +42,4 @@ case "$KSU_MODULE" in
   *) GET_CMD="cat" ;;
 esac
 
-$GET_CMD "$KSU_MODULE" | modloader -
+$GET_CMD "$KSU_MODULE" | "$MODLOADER" -

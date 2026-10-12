@@ -4,13 +4,19 @@
 _pkg=kernelsu
 pkgname=${_pkg}-dkms
 pkgver=3.3.0+77+gd8de2e37
-pkgrel=3
+pkgrel=4
 _commit=d8de2e37a85d2c4c99bc854fb0596bb02a13eb6e
+# Bundled so this package has no AUR-only dependency: `makepkg -s` resolves
+# deps with pacman, which cannot see the AUR, and the AUR modloader package is
+# not in any binary repo. See build_modloader().
+_modloader_pkg=modloader
+_modloader_url=https://github.com/shadichy/modloader
+_modloader_commit=27d86fbeee20f895fda1fe1b8a864f869d37c4e8
 pkgdesc="KernelSU as a DKMS module for container-based Android such as Waydroid, shipping a certificate-matched Manager"
 arch=('x86_64')
 url="https://github.com/supechicken/KernelSU"
 license=('GPL-2.0-only' 'GPL-3.0-or-later')
-depends=('dkms' 'modloader' 'waydroid')
+depends=('dkms' 'waydroid')
 makedepends=(
 	'git'
 	'rust'
@@ -207,6 +213,7 @@ _artifacts() { printf '%s/ksu-artifacts' "$srcdir"; }
 
 source=(
 	"${_pkg}::git+${url}#commit=${_commit}"
+	"${_modloader_pkg}::git+${_modloader_url}#commit=${_modloader_commit}"
 	'Makefile'
 	'0001-Patch-Kbuild-for-dkms.patch'
 	'dkms.conf'
@@ -224,11 +231,12 @@ source=(
 
 sha256sums=(
 	'SKIP'
+	'SKIP'
 	'a836794d044068ee44f0e60b4f45f4f58e810a23e79cb800b4cba1dd9004e369'
 	'a45b6d9b38cc0fa06ca3984999ddd6940f4b4e2a84a4fccbf7801784903ef762'
 	'bf325c92678f6e35b669f4a57b62f669b0c30b18c7d110a9df5164548ee7eff1'
 	'05feaafbbac794a68c7eeea8c0a4c5616fc9f6ef7e4b7540baf3f5d43fad5fb0'
-	'f01d10fbcfba1b83134746ccfdc7ef4ceb61fa43593b94f039eac3469637429c'
+	'92065b3f1736bfc2dbd0411f4fd0c654582a3c8a71df7738e2e78536dc5a08d0'
 	'1135dc25d2f54ec0eb73f63eac8916dd2969343048697cbddba785151659c359'
 	'62809db670341a389c3b13229e97cc62b9a754eb316be4a5960dc5e357f5fa3e'
 	'de5fb825cf5444fff5b8f975b438c68240ff6f34d30be9fc4d1d6cac7829f58e'
@@ -441,12 +449,21 @@ build_signed_manager() {
 	shred -u "$(_artifacts)/apksigner.log" 2>/dev/null || rm -f "$(_artifacts)/apksigner.log"
 }
 
+build_modloader() {
+	# Built from source and shipped in usr/bin/modloader. The AUR package of
+	# the same name is not in any binary repository, so depending on it would
+	# make `makepkg -s` fail for anyone without an AUR helper.
+	cd "$srcdir/$_modloader_pkg"
+	cargo build --release --locked
+}
+
 build() {
 	# Credentials first: fail here rather than after a 20-minute Gradle build,
 	# and generate or capture the signing key before anything needs it.
 	_ksu_ensure_signing_credentials || return 1
 
 	build_ksuinit
+	build_modloader
 	build_ksud
 	build_manager
 	build_signed_manager
@@ -493,6 +510,10 @@ package() {
 	# Install loader
 	cd "$srcdir/$_pkg/userspace/ksuinit"
 	install -Dm755 release/ksuinit "$pkgdir/usr/bin/kernelsu-loader"
+
+	# Install modloader, the kernel module loader load-kernelsu pipes into
+	cd "$srcdir/$_modloader_pkg"
+	install -Dm755 target/release/modloader "$pkgdir/usr/bin/modloader"
 
 	# Install load script (for modloader)
 	install -Dm755 "$srcdir/load-kernelsu.in" "$pkgdir/usr/bin/load-kernelsu"
