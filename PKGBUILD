@@ -4,7 +4,7 @@
 _pkg=kernelsu
 pkgname=${_pkg}-dkms
 pkgver=3.3.0+77+gd8de2e37
-pkgrel=2
+pkgrel=3
 _commit=d8de2e37a85d2c4c99bc854fb0596bb02a13eb6e
 pkgdesc="KernelSU as a DKMS module for container-based Android such as Waydroid, shipping a certificate-matched Manager"
 arch=('x86_64')
@@ -24,6 +24,7 @@ makedepends=(
 	'python'
 	'ninja'
 	'jdk21-openjdk'
+	'util-linux'
 	'android-sdk-cmdline-tools-latest'
 )
 options=('!strip' '!emptydirs')
@@ -45,12 +46,161 @@ _manager_pkg=me.weishu.kernelsu
 _manager_code=32678
 
 # --- Signing ------------------------------------------------------------------
-# Read from the environment only. The keystore, its password and the temporary
-# repack config are never placed in $pkgdir. Reuse the same key across rebuilds,
-# otherwise the certificate baked into the module stops matching the Manager.
-_keystore="${KSU_KEYSTORE:-$HOME/.config/kernelsu-waydroid/manager.p12}"
-_password_file="${KSU_PASSWORD_FILE:-$HOME/.config/kernelsu-waydroid/password}"
-_key_alias="${KSU_KEY_ALIAS:-waydroid-ksu}"
+# Credentials live outside $srcdir and $pkgdir and are never packaged: only the
+# signed APK and the public certificate end up in the package. Reuse the same
+# key across rebuilds, otherwise the certificate baked into the module stops
+# matching the Manager and the Manager has to be reinstalled.
+#
+# Established by _ksu_ensure_signing_credentials(), which runs first in build().
+_ksu_ensure_signing_credentials() {
+	export KSU_KEYSTORE="${KSU_KEYSTORE:-$HOME/.config/kernelsu-waydroid/manager.p12}"
+	export KSU_PASSWORD_FILE="${KSU_PASSWORD_FILE:-$HOME/.config/kernelsu-waydroid/manager-password}"
+	export KSU_KEY_ALIAS="${KSU_KEY_ALIAS:-waydroid-ksu}"
+
+	local keytool=/usr/lib/jvm/java-21-openjdk/bin/keytool
+	[[ -x $keytool ]] || keytool=$(command -v keytool) || {
+		printf 'error: keytool not found; install jdk21-openjdk\n' >&2
+		return 1
+	}
+
+	# Credential setup runs in a subshell so its umask, fd and trap do not
+	# leak into the rest of the build.
+	(
+		umask 077
+
+		local temp_password='' temp_key_dir='' supplied_password=''
+
+		mkdir -p -- "$(dirname -- "$KSU_KEYSTORE")" \
+			"$(dirname -- "$KSU_PASSWORD_FILE")" || exit 1
+
+		# Refuse to follow a symlink: the target may not be what it looks
+		# like, and we would otherwise overwrite it.
+		[[ ! -L $KSU_KEYSTORE && ! -L $KSU_PASSWORD_FILE ]] || {
+			printf 'error: signing credential paths must not be symlinks\n' >&2
+			exit 1
+		}
+
+		# Serialise concurrent builds sharing this keystore.
+		exec {signing_lock_fd}>"${KSU_KEYSTORE}.lock" || exit 1
+		flock "$signing_lock_fd" || exit 1
+
+		trap '
+			[[ -z "$temp_password" ]] || rm -f -- "$temp_password"
+			[[ -z "$temp_key_dir" ]] || rm -rf -- "$temp_key_dir"
+		' EXIT
+
+		validate() {
+			"$keytool" -list -keystore "$KSU_KEYSTORE" \
+				-alias "$KSU_KEY_ALIAS" -storepass:file "$1" >/dev/null 2>&1
+		}
+
+		# An empty existing file means an interrupted earlier run, not a
+		# blank password. Never overwrite either one.
+		[[ ! -e $KSU_KEYSTORE || -s $KSU_KEYSTORE ]] || {
+			printf 'error: %s exists but is empty; refusing to replace it\n' "$KSU_KEYSTORE" >&2
+			exit 1
+		}
+		[[ ! -e $KSU_PASSWORD_FILE || -s $KSU_PASSWORD_FILE ]] || {
+			printf 'error: %s exists but is empty\n' "$KSU_PASSWORD_FILE" >&2
+			exit 1
+		}
+
+		if [[ ! -e $KSU_PASSWORD_FILE ]]; then
+			temp_password=$(mktemp "${KSU_PASSWORD_FILE}.tmp.XXXXXX") || exit 1
+
+			if [[ -e $KSU_KEYSTORE ]]; then
+				# An existing keystore can only be unlocked by its real
+				# password. Generating a random one here would lock the
+				# user out of their own key.
+				if [[ -n ${KSU_SIGNING_PASSWORD:-} ]]; then
+					supplied_password=$KSU_SIGNING_PASSWORD
+				elif [[ ${KSU_ALLOW_PASSWORD_PROMPT:-1} == 1 ]] &&
+					{ true >/dev/tty; } 2>/dev/null; then
+					printf 'Enter the existing password for %s (alias %s): ' \
+						"$KSU_KEYSTORE" "$KSU_KEY_ALIAS" >/dev/tty
+					IFS= read -r -s supplied_password </dev/tty || {
+						printf '\n' >/dev/tty
+						exit 1
+					}
+					printf '\n' >/dev/tty
+				else
+					{
+						printf 'error: %s has no password file and cannot be unlocked automatically.\n' "$KSU_KEYSTORE"
+						printf 'Create %s containing its password, or set KSU_PASSWORD_FILE.\n' "$KSU_PASSWORD_FILE"
+						printf 'For unattended builds, inject KSU_SIGNING_PASSWORD.\n'
+						printf 'The existing keystore will not be replaced.\n'
+					} >&2
+					exit 1
+				fi
+
+				[[ -n $supplied_password ]] || {
+					printf 'error: empty password supplied\n' >&2
+					exit 1
+				}
+
+				printf '%s' "$supplied_password" >"$temp_password" || exit 1
+				unset supplied_password
+
+				# Persist only a password that actually opens the keystore.
+				if ! validate "$temp_password"; then
+					printf 'error: password rejected by %s; nothing was saved\n' "$KSU_KEYSTORE" >&2
+					exit 1
+				fi
+			else
+				# Brand new key: generate its password alongside it.
+				openssl rand -base64 48 | tr -d '\n' >"$temp_password" || exit 1
+				[[ -s $temp_password ]] || {
+					printf 'error: failed to generate a signing password\n' >&2
+					exit 1
+				}
+			fi
+
+			chmod 600 "$temp_password" || exit 1
+			mv -- "$temp_password" "$KSU_PASSWORD_FILE" || exit 1
+			temp_password=''
+		fi
+
+		if [[ ! -e $KSU_KEYSTORE ]]; then
+			# Generate into a temporary directory; publish only on success so
+			# a failed keygen never leaves a half-written keystore behind.
+			temp_key_dir=$(mktemp -d "$(dirname -- "$KSU_KEYSTORE")/.ksu-keygen.XXXXXX") || exit 1
+
+			"$keytool" -genkeypair \
+				-keystore "$temp_key_dir/manager.p12" \
+				-storetype PKCS12 \
+				-alias "$KSU_KEY_ALIAS" \
+				-keyalg RSA \
+				-keysize 2048 \
+				-validity 10000 \
+				-dname 'CN=Waydroid KernelSU Local' \
+				-storepass:file "$KSU_PASSWORD_FILE" \
+				-keypass:file "$KSU_PASSWORD_FILE" >/dev/null || {
+					printf 'error: keytool -genkeypair failed\n' >&2
+					exit 1
+				}
+
+			chmod 600 "$temp_key_dir/manager.p12" || exit 1
+			mv -- "$temp_key_dir/manager.p12" "$KSU_KEYSTORE" || exit 1
+		fi
+
+		chmod 600 "$KSU_KEYSTORE" "$KSU_PASSWORD_FILE" || exit 1
+
+		# Final gate: never build against credentials that do not work.
+		if ! validate "$KSU_PASSWORD_FILE"; then
+			printf 'error: %s does not open with %s (alias %s).\n' \
+				"$KSU_KEYSTORE" "$KSU_PASSWORD_FILE" "$KSU_KEY_ALIAS" >&2
+			printf 'Check that the password is correct and the alias exists:\n' >&2
+			printf '  keytool -list -keystore %s -storepass:file %s\n' \
+				"$KSU_KEYSTORE" "$KSU_PASSWORD_FILE" >&2
+			exit 1
+		fi
+
+		printf '==> Signing credentials ready: %s\n' "$KSU_KEYSTORE"
+	) || return 1
+
+	# Keep an injected password out of any later build subprocess.
+	unset KSU_SIGNING_PASSWORD
+}
 
 # Resolved at run time; $srcdir is not set while the PKGBUILD is sourced.
 _artifacts() { printf '%s/ksu-artifacts' "$srcdir"; }
@@ -177,30 +327,38 @@ build_manager() {
 }
 
 build_signed_manager() {
-	local keystore password_file alias password repack_config out
+	local keystore password_file alias password repack_config out keytool
 
-	keystore=$(realpath -e "$_keystore") || {
-		printf 'error: keystore not found: %s\n' "$_keystore" >&2
-		printf 'Set KSU_KEYSTORE, or create one with:\n' >&2
-		printf '  keytool -genkeypair -keystore %s -storetype PKCS12 \\\n' "$_keystore" >&2
-		printf '    -alias %s -keyalg RSA -keysize 2048 -validity 10000 \\\n' "$_key_alias" >&2
-		printf '    -dname CN=Waydroid-KernelSU\n' >&2
+	# Resolved by _ksu_ensure_signing_credentials() at the top of build().
+	: "${KSU_KEYSTORE:?signing credentials were not initialised}"
+	: "${KSU_PASSWORD_FILE:?signing credentials were not initialised}"
+	: "${KSU_KEY_ALIAS:?signing credentials were not initialised}"
+
+	keytool=/usr/lib/jvm/java-21-openjdk/bin/keytool
+	[[ -x $keytool ]] || keytool=$(command -v keytool)
+
+	keystore=$(realpath -e "$KSU_KEYSTORE") || {
+		printf 'error: keystore not found: %s\n' "$KSU_KEYSTORE" >&2
 		return 1
 	}
-	password_file=$(realpath -e "$_password_file") || {
-		printf 'error: keystore password file not found: %s\n' "$_password_file" >&2
-		printf 'Set KSU_PASSWORD_FILE to a file holding the keystore password.\n' >&2
+	password_file=$(realpath -e "$KSU_PASSWORD_FILE") || {
+		printf 'error: keystore password file not found: %s\n' "$KSU_PASSWORD_FILE" >&2
 		return 1
 	}
-	alias=$_key_alias
+	alias=$KSU_KEY_ALIAS
 
+	# Strip a trailing newline: keytool -storepass:file tolerates one, but the
+	# password handed to apksigner must match byte for byte.
 	password=$(<"$password_file")
+	password=${password%$'\n'}
 	[[ -n $password ]] || {
 		printf 'error: %s is empty\n' "$password_file" >&2
 		return 1
 	}
 
-	keytool -list -keystore "$keystore" -alias "$alias" \
+	# Already validated in _ksu_ensure_signing_credentials(); this guards
+	# against the files changing underneath us mid-build.
+	"$keytool" -list -keystore "$keystore" -alias "$alias" \
 		-storepass:file "$password_file" >/dev/null
 
 	mkdir -p "$(_artifacts)"
@@ -250,7 +408,7 @@ build_signed_manager() {
 	}
 
 	# Public certificate only; this is what gets baked into dkms.conf.
-	keytool -exportcert -keystore "$keystore" -alias "$alias" \
+	"$keytool" -exportcert -keystore "$keystore" -alias "$alias" \
 		-storepass:file "$password_file" -file "$(_artifacts)/manager-cert.der"
 
 	# Fail loudly rather than shipping a package whose module will not accept
@@ -284,6 +442,10 @@ build_signed_manager() {
 }
 
 build() {
+	# Credentials first: fail here rather than after a 20-minute Gradle build,
+	# and generate or capture the signing key before anything needs it.
+	_ksu_ensure_signing_credentials || return 1
+
 	build_ksuinit
 	build_ksud
 	build_manager

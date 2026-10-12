@@ -44,15 +44,21 @@ always safe.
   is deliberately not a dependency: DKMS packages must stay usable across kernels.
 - Roughly 15 GiB free and a lot of patience. The Android SDK, NDK and a Gradle
   build are involved.
-- A signing key. See [Signing key](#signing-key).
+- A signing key. You do not have to create it; the build does. See
+  [Signing key](#signing-key).
 
 ## Install
 
 ```bash
 git clone https://github.com/marufmoinuddin/kernlsu-dkms-archlinux.git
 cd kernlsu-dkms-archlinux
-makepkg -si
+makepkg -s
 ```
+
+`-s` installs any missing build dependencies and then runs the normal build. On
+the first run it will generate your signing key for you (see
+[Signing key](#signing-key)). `makepkg -si` does the same and installs the
+result.
 
 Then reboot, and make sure the module loaded:
 
@@ -79,36 +85,64 @@ repositories.
 ## Signing key
 
 The module only accepts a Manager signed with the certificate it was built
-against, so **the key must be stable across rebuilds**. Losing it means the
+against, so **the key must stay the same across rebuilds**. Losing it means the
 Manager gets replaced and its app-local settings reset.
 
-Generate one once:
+**You do not need to create this yourself.** On the first `makepkg -s` the build
+handles it:
+
+- No keystore → generates a keystore and a random password together.
+- Keystore **and** password file present → reuses both, silently.
+- Keystore but **no** password file → prompts once for the existing password,
+  checks it actually opens the keystore, then saves it. This is the one-time
+  step if you already have a key from elsewhere.
+
+After that capture, builds are fully unattended. So the usual case is just:
 
 ```bash
-mkdir -p ~/.config/kernelsu-waydroid
-openssl rand -base64 48 > ~/.config/kernelsu-waydroid/password
-chmod 600 ~/.config/kernelsu-waydroid/password
+makepkg -s
+```
 
-keytool -genkeypair \
-  -keystore ~/.config/kernelsu-waydroid/manager.p12 \
-  -storetype PKCS12 \
-  -alias waydroid-ksu \
-  -keyalg RSA -keysize 2048 -validity 10000 \
-  -dname 'CN=Waydroid KernelSU Local' \
-  -storepass:file ~/.config/kernelsu-waydroid/password \
-  -keypass:file ~/.config/kernelsu-waydroid/password
+Credentials live in `~/.config/kernelsu-waydroid/`:
+
+```
+manager.p12        the private key
+manager-password   its password
 ```
 
 Keep that directory safe. Anyone with both files can sign a Manager your kernel
-will accept. The build never copies them into the package.
+will accept. The build never copies either file into the package, the package
+archive, or the build log — only the signed APK and the public certificate.
 
-If your key lives elsewhere, point the build at it:
+The build will **never** silently replace an existing key. If it cannot unlock
+one it stops and tells you, rather than generating a password that does not
+match and locking you out.
+
+### Unattended builds (CI)
+
+If there is no terminal, the prompt is skipped. If a keystore exists without its
+password file the build then fails safely. Supply the password explicitly:
+
+```bash
+KSU_SIGNING_PASSWORD='...' KSU_ALLOW_PASSWORD_PROMPT=0 makepkg -s --noconfirm
+```
+
+Or write the password file once and let the build reuse it.
+
+### Custom locations
 
 ```bash
 KSU_KEYSTORE=/path/to/manager.p12 \
-KSU_PASSWORD_FILE=/path/to/password \
-makepkg -si
+KSU_PASSWORD_FILE=/path/to/manager-password \
+KSU_KEY_ALIAS=my-alias \
+makepkg -s
 ```
+
+### Back from an old manual setup
+
+If you previously generated the key by hand, move the password file to the name
+the build expects (`password` → `manager-password`) or point `KSU_PASSWORD_FILE`
+at it. Otherwise you will be asked for the password once.
 
 ## Android SDK
 
@@ -120,7 +154,7 @@ If components are missing the build stops and tells you exactly what to install.
 To let it install them itself (this accepts the SDK licence prompts for you):
 
 ```bash
-KSU_SDK_AUTO_PROVISION=1 makepkg -si
+KSU_SDK_AUTO_PROVISION=1 makepkg -s
 ```
 
 ## When the integration does not run
@@ -133,6 +167,9 @@ failing, and a timer retries every 15 minutes. To run it by hand:
 sudo systemctl start kernelsu-waydroid-apply.service
 sudo journalctl -u kernelsu-waydroid-apply -f
 ```
+
+An "Existing KernelSU keystore has no password file" style error here means the
+capture step never ran; see [Signing key](#signing-key).
 
 Backups and logs from every run are kept under:
 
